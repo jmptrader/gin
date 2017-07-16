@@ -5,7 +5,6 @@
 package gin
 
 import (
-	"encoding/json"
 	"errors"
 	"testing"
 
@@ -32,7 +31,7 @@ func TestError(t *testing.T) {
 	})
 
 	jsonBytes, _ := json.Marshal(err)
-	assert.Equal(t, string(jsonBytes), "{\"error\":\"test error\",\"meta\":\"some data\"}")
+	assert.Equal(t, "{\"error\":\"test error\",\"meta\":\"some data\"}", string(jsonBytes))
 
 	err.SetMeta(H{
 		"status": "200",
@@ -54,6 +53,13 @@ func TestError(t *testing.T) {
 		"status": "200",
 		"data":   "some data",
 	})
+
+	type customError struct {
+		status string
+		data   string
+	}
+	err.SetMeta(customError{status: "200", data: "other data"})
+	assert.Equal(t, err.JSON(), customError{status: "200", data: "other data"})
 }
 
 func TestErrorSlice(t *testing.T) {
@@ -63,6 +69,7 @@ func TestErrorSlice(t *testing.T) {
 		{Err: errors.New("third"), Type: ErrorTypePublic, Meta: H{"status": "400"}},
 	}
 
+	assert.Equal(t, errs, errs.ByType(ErrorTypeAny))
 	assert.Equal(t, errs.Last().Error(), "third")
 	assert.Equal(t, errs.Errors(), []string{"first", "second", "third"})
 	assert.Equal(t, errs.ByType(ErrorTypePublic).Errors(), []string{"third"})
@@ -83,7 +90,7 @@ Error #03: third
 		H{"error": "third", "status": "400"},
 	})
 	jsonBytes, _ := json.Marshal(errs)
-	assert.Equal(t, string(jsonBytes), "[{\"error\":\"first\"},{\"error\":\"second\",\"meta\":\"some data\"},{\"error\":\"third\",\"status\":\"400\"}]")
+	assert.Equal(t, "[{\"error\":\"first\"},{\"error\":\"second\",\"meta\":\"some data\"},{\"error\":\"third\",\"status\":\"400\"}]", string(jsonBytes))
 	errs = errorMsgs{
 		{Err: errors.New("first"), Type: ErrorTypePrivate},
 	}

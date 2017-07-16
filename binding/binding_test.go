@@ -6,19 +6,23 @@ package binding
 
 import (
 	"bytes"
+	"mime/multipart"
 	"net/http"
 	"testing"
 
+	"github.com/gin-gonic/gin/binding/example"
+	"github.com/golang/protobuf/proto"
 	"github.com/stretchr/testify/assert"
+	"github.com/ugorji/go/codec"
 )
 
 type FooStruct struct {
-	Foo string `json:"foo" form:"foo" xml:"foo" binding:"required"`
+	Foo string `msgpack:"foo" json:"foo" form:"foo" xml:"foo" binding:"required"`
 }
 
 type FooBarStruct struct {
 	FooStruct
-	Bar string `json:"bar" form:"bar" xml:"bar" binding:"required"`
+	Bar string `msgpack:"bar" json:"bar" form:"bar" xml:"bar" binding:"required"`
 }
 
 func TestBindingDefault(t *testing.T) {
@@ -36,6 +40,12 @@ func TestBindingDefault(t *testing.T) {
 
 	assert.Equal(t, Default("POST", MIMEMultipartPOSTForm), Form)
 	assert.Equal(t, Default("PUT", MIMEMultipartPOSTForm), Form)
+
+	assert.Equal(t, Default("POST", MIMEPROTOBUF), ProtoBuf)
+	assert.Equal(t, Default("PUT", MIMEPROTOBUF), ProtoBuf)
+
+	assert.Equal(t, Default("POST", MIMEMSGPACK), MsgPack)
+	assert.Equal(t, Default("PUT", MIMEMSGPACK2), MsgPack)
 }
 
 func TestBindingJSON(t *testing.T) {
@@ -64,6 +74,76 @@ func TestBindingXML(t *testing.T) {
 		"<map><foo>bar</foo></map>", "<map><bar>foo</bar></map>")
 }
 
+func createFormPostRequest() *http.Request {
+	req, _ := http.NewRequest("POST", "/?foo=getfoo&bar=getbar", bytes.NewBufferString("foo=bar&bar=foo"))
+	req.Header.Set("Content-Type", MIMEPOSTForm)
+	return req
+}
+
+func createFormMultipartRequest() *http.Request {
+	boundary := "--testboundary"
+	body := new(bytes.Buffer)
+	mw := multipart.NewWriter(body)
+	defer mw.Close()
+
+	mw.SetBoundary(boundary)
+	mw.WriteField("foo", "bar")
+	mw.WriteField("bar", "foo")
+	req, _ := http.NewRequest("POST", "/?foo=getfoo&bar=getbar", body)
+	req.Header.Set("Content-Type", MIMEMultipartPOSTForm+"; boundary="+boundary)
+	return req
+}
+
+func TestBindingFormPost(t *testing.T) {
+	req := createFormPostRequest()
+	var obj FooBarStruct
+	FormPost.Bind(req, &obj)
+
+	assert.Equal(t, obj.Foo, "bar")
+	assert.Equal(t, obj.Bar, "foo")
+}
+
+func TestBindingFormMultipart(t *testing.T) {
+	req := createFormMultipartRequest()
+	var obj FooBarStruct
+	FormMultipart.Bind(req, &obj)
+
+	assert.Equal(t, obj.Foo, "bar")
+	assert.Equal(t, obj.Bar, "foo")
+}
+
+func TestBindingProtoBuf(t *testing.T) {
+	test := &example.Test{
+		Label: proto.String("yes"),
+	}
+	data, _ := proto.Marshal(test)
+
+	testProtoBodyBinding(t,
+		ProtoBuf, "protobuf",
+		"/", "/",
+		string(data), string(data[1:]))
+}
+
+func TestBindingMsgPack(t *testing.T) {
+	test := FooStruct{
+		Foo: "bar",
+	}
+
+	h := new(codec.MsgpackHandle)
+	assert.NotNil(t, h)
+	buf := bytes.NewBuffer([]byte{})
+	assert.NotNil(t, buf)
+	err := codec.NewEncoder(buf, h).Encode(test)
+	assert.NoError(t, err)
+
+	data := buf.Bytes()
+
+	testMsgPackBodyBinding(t,
+		MsgPack, "msgpack",
+		"/", "/",
+		string(data), string(data[1:]))
+}
+
 func TestValidationFails(t *testing.T) {
 	var obj FooStruct
 	req := requestWithBody("POST", "/", `{"bar": "foo"}`)
@@ -80,6 +160,28 @@ func TestValidationDisabled(t *testing.T) {
 	req := requestWithBody("POST", "/", `{"bar": "foo"}`)
 	err := JSON.Bind(req, &obj)
 	assert.NoError(t, err)
+}
+
+func TestExistsSucceeds(t *testing.T) {
+	type HogeStruct struct {
+		Hoge *int `json:"hoge" binding:"exists"`
+	}
+
+	var obj HogeStruct
+	req := requestWithBody("POST", "/", `{"hoge": 0}`)
+	err := JSON.Bind(req, &obj)
+	assert.NoError(t, err)
+}
+
+func TestExistsFails(t *testing.T) {
+	type HogeStruct struct {
+		Hoge *int `json:"foo" binding:"exists"`
+	}
+
+	var obj HogeStruct
+	req := requestWithBody("POST", "/", `{"boen": 0}`)
+	err := JSON.Bind(req, &obj)
+	assert.Error(t, err)
 }
 
 func testFormBinding(t *testing.T, method, path, badPath, body, badBody string) {
@@ -114,6 +216,40 @@ func testBodyBinding(t *testing.T, b Binding, name, path, badPath, body, badBody
 	obj = FooStruct{}
 	req = requestWithBody("POST", badPath, badBody)
 	err = JSON.Bind(req, &obj)
+	assert.Error(t, err)
+}
+
+func testProtoBodyBinding(t *testing.T, b Binding, name, path, badPath, body, badBody string) {
+	assert.Equal(t, b.Name(), name)
+
+	obj := example.Test{}
+	req := requestWithBody("POST", path, body)
+	req.Header.Add("Content-Type", MIMEPROTOBUF)
+	err := b.Bind(req, &obj)
+	assert.NoError(t, err)
+	assert.Equal(t, *obj.Label, "yes")
+
+	obj = example.Test{}
+	req = requestWithBody("POST", badPath, badBody)
+	req.Header.Add("Content-Type", MIMEPROTOBUF)
+	err = ProtoBuf.Bind(req, &obj)
+	assert.Error(t, err)
+}
+
+func testMsgPackBodyBinding(t *testing.T, b Binding, name, path, badPath, body, badBody string) {
+	assert.Equal(t, b.Name(), name)
+
+	obj := FooStruct{}
+	req := requestWithBody("POST", path, body)
+	req.Header.Add("Content-Type", MIMEMSGPACK)
+	err := b.Bind(req, &obj)
+	assert.NoError(t, err)
+	assert.Equal(t, obj.Foo, "bar")
+
+	obj = FooStruct{}
+	req = requestWithBody("POST", badPath, badBody)
+	req.Header.Add("Content-Type", MIMEMSGPACK)
+	err = MsgPack.Bind(req, &obj)
 	assert.Error(t, err)
 }
 

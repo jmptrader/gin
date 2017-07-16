@@ -1,6 +1,6 @@
 // Copyright 2013 Julien Schmidt. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be found
-// in the LICENSE file.
+// at https://github.com/julienschmidt/httprouter/blob/master/LICENSE
 
 package gin
 
@@ -21,7 +21,7 @@ func printChildren(n *node, prefix string) {
 	}
 }
 
-// Used as a workaround since we can't compare functions or their adresses
+// Used as a workaround since we can't compare functions or their addressses
 var fakeHandlerValue string
 
 func fakeHandler(val string) HandlersChain {
@@ -37,9 +37,14 @@ type testRequests []struct {
 	ps         Params
 }
 
-func checkRequests(t *testing.T, tree *node, requests testRequests) {
+func checkRequests(t *testing.T, tree *node, requests testRequests, unescapes ...bool) {
+	unescape := false
+	if len(unescapes) >= 1 {
+		unescape = unescapes[0]
+	}
+
 	for _, request := range requests {
-		handler, ps, _ := tree.getValue(request.path, nil)
+		handler, ps, _ := tree.getValue(request.path, nil, unescape)
 
 		if handler == nil {
 			if !request.nilHandler {
@@ -88,7 +93,7 @@ func checkMaxParams(t *testing.T, n *node) uint8 {
 			maxParams = params
 		}
 	}
-	if n.nType != static && !n.wildChild {
+	if n.nType > root && !n.wildChild {
 		maxParams++
 	}
 
@@ -192,6 +197,45 @@ func TestTreeWildcard(t *testing.T) {
 		{"/info/gordon/public", false, "/info/:user/public", Params{Param{"user", "gordon"}}},
 		{"/info/gordon/project/go", false, "/info/:user/project/:project", Params{Param{"user", "gordon"}, Param{"project", "go"}}},
 	})
+
+	checkPriorities(t, tree)
+	checkMaxParams(t, tree)
+}
+
+func TestUnescapeParameters(t *testing.T) {
+	tree := &node{}
+
+	routes := [...]string{
+		"/",
+		"/cmd/:tool/:sub",
+		"/cmd/:tool/",
+		"/src/*filepath",
+		"/search/:query",
+		"/files/:dir/*filepath",
+		"/info/:user/project/:project",
+		"/info/:user",
+	}
+	for _, route := range routes {
+		tree.addRoute(route, fakeHandler(route))
+	}
+
+	//printChildren(tree, "")
+	unescape := true
+	checkRequests(t, tree, testRequests{
+		{"/", false, "/", nil},
+		{"/cmd/test/", false, "/cmd/:tool/", Params{Param{"tool", "test"}}},
+		{"/cmd/test", true, "", Params{Param{"tool", "test"}}},
+		{"/src/some/file.png", false, "/src/*filepath", Params{Param{"filepath", "/some/file.png"}}},
+		{"/src/some/file+test.png", false, "/src/*filepath", Params{Param{"filepath", "/some/file test.png"}}},
+		{"/src/some/file++++%%%%test.png", false, "/src/*filepath", Params{Param{"filepath", "/some/file++++%%%%test.png"}}},
+		{"/src/some/file%2Ftest.png", false, "/src/*filepath", Params{Param{"filepath", "/some/file/test.png"}}},
+		{"/search/someth!ng+in+ünìcodé", false, "/search/:query", Params{Param{"query", "someth!ng in ünìcodé"}}},
+		{"/info/gordon/project/go", false, "/info/:user/project/:project", Params{Param{"user", "gordon"}, Param{"project", "go"}}},
+		{"/info/slash%2Fgordon", false, "/info/:user", Params{Param{"user", "slash/gordon"}}},
+		{"/info/slash%2Fgordon/project/Project%20%231", false, "/info/:user/project/:project", Params{Param{"user", "slash/gordon"}, Param{"project", "Project #1"}}},
+		{"/info/slash%%%%", false, "/info/:user", Params{Param{"user", "slash%%%%"}}},
+		{"/info/slash%%%%2Fgordon/project/Project%%%%20%231", false, "/info/:user/project/:project", Params{Param{"user", "slash%%%%2Fgordon"}, Param{"project", "Project%%%%20%231"}}},
+	}, unescape)
 
 	checkPriorities(t, tree)
 	checkMaxParams(t, tree)
@@ -364,14 +408,13 @@ func TestTreeDoubleWildcard(t *testing.T) {
 }
 
 /*func TestTreeDuplicateWildcard(t *testing.T) {
-    tree := &node{}
-
-    routes := [...]string{
-        "/:id/:name/:id",
-    }
-    for _, route := range routes {
-        ...
-    }
+	tree := &node{}
+	routes := [...]string{
+		"/:id/:name/:id",
+	}
+	for _, route := range routes {
+		...
+	}
 }*/
 
 func TestTreeTrailingSlashRedirect(t *testing.T) {
@@ -393,6 +436,9 @@ func TestTreeTrailingSlashRedirect(t *testing.T) {
 		"/1/:id/2",
 		"/aa",
 		"/a/",
+		"/admin",
+		"/admin/:category",
+		"/admin/:category/:page",
 		"/doc",
 		"/doc/go_faq.html",
 		"/doc/go1.html",
@@ -422,10 +468,13 @@ func TestTreeTrailingSlashRedirect(t *testing.T) {
 		"/0/go/",
 		"/1/go",
 		"/a",
+		"/admin/",
+		"/admin/config/",
+		"/admin/config/permissions/",
 		"/doc/",
 	}
 	for _, route := range tsrRoutes {
-		handler, _, tsr := tree.getValue(route, nil)
+		handler, _, tsr := tree.getValue(route, nil, false)
 		if handler != nil {
 			t.Fatalf("non-nil handler for TSR route '%s", route)
 		} else if !tsr {
@@ -442,12 +491,30 @@ func TestTreeTrailingSlashRedirect(t *testing.T) {
 		"/api/world/abc",
 	}
 	for _, route := range noTsrRoutes {
-		handler, _, tsr := tree.getValue(route, nil)
+		handler, _, tsr := tree.getValue(route, nil, false)
 		if handler != nil {
 			t.Fatalf("non-nil handler for No-TSR route '%s", route)
 		} else if tsr {
 			t.Errorf("expected no TSR recommendation for route '%s'", route)
 		}
+	}
+}
+
+func TestTreeRootTrailingSlashRedirect(t *testing.T) {
+	tree := &node{}
+
+	recv := catchPanic(func() {
+		tree.addRoute("/:test", fakeHandler("/:test"))
+	})
+	if recv != nil {
+		t.Fatalf("panic inserting test route: %v", recv)
+	}
+
+	handler, _, tsr := tree.getValue("/", nil, false)
+	if handler != nil {
+		t.Fatalf("non-nil handler")
+	} else if tsr {
+		t.Errorf("expected no TSR recommendation")
 	}
 }
 
@@ -583,6 +650,8 @@ func TestTreeFindCaseInsensitivePath(t *testing.T) {
 }
 
 func TestTreeInvalidNodeType(t *testing.T) {
+	const panicMsg = "invalid node type"
+
 	tree := &node{}
 	tree.addRoute("/", fakeHandler("/"))
 	tree.addRoute("/:page", fakeHandler("/:page"))
@@ -592,17 +661,17 @@ func TestTreeInvalidNodeType(t *testing.T) {
 
 	// normal lookup
 	recv := catchPanic(func() {
-		tree.getValue("/test", nil)
+		tree.getValue("/test", nil, false)
 	})
-	if rs, ok := recv.(string); !ok || rs != "invalid node type" {
-		t.Fatalf(`Expected panic "invalid node type", got "%v"`, recv)
+	if rs, ok := recv.(string); !ok || rs != panicMsg {
+		t.Fatalf("Expected panic '"+panicMsg+"', got '%v'", recv)
 	}
 
 	// case-insensitive lookup
 	recv = catchPanic(func() {
 		tree.findCaseInsensitivePath("/test", true)
 	})
-	if rs, ok := recv.(string); !ok || rs != "invalid node type" {
-		t.Fatalf(`Expected panic "invalid node type", got "%v"`, recv)
+	if rs, ok := recv.(string); !ok || rs != panicMsg {
+		t.Fatalf("Expected panic '"+panicMsg+"', got '%v'", recv)
 	}
 }
